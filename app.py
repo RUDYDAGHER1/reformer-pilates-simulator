@@ -9,12 +9,12 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🧘 Reformer Pilates Investment & Recurrent Customer Simulator")
+st.title("Reformer Pilates Investment & Recurrent Customer Simulator")
 
 st.markdown(
     "This tool simulates **investment returns** (IRR, NPV, payback), "
-    "**capital structure & WACC**, an **exit scenario**, and estimates "
-    "**recurring clients** needed. Outputs are shown mainly as tables for clarity."
+    "**capital structure & WACC**, and estimates **recurring clients** needed. "
+    "Outputs are shown mainly as tables for clarity."
 )
 
 # ---------- HELPER: PAYBACK ----------
@@ -64,12 +64,12 @@ with tab1:
         with col_b:
             st.markdown("**Financial Assumptions**")
             st.markdown("- Corporate Tax: **9.0 %**")
-            st.markdown("- Base WACC in deck: **10.5 %**")
+            st.markdown("- Target WACC in deck: **10.5 %**")
             st.markdown("- Sales Simulation Factor: **1.0** (slider below)")
             st.markdown("- OPEX Simulation Factor: **1.0** (slider below)")
             st.info(
                 "In this app, WACC is recalculated dynamically from your **equity vs loan** "
-                "choices and tax rate, and IRRs include an optional **exit value**."
+                "choices and tax rate."
             )
 
     # ========== INPUTS ==========
@@ -127,7 +127,8 @@ with tab1:
         # Lever-style slider for equity vs loan
         st.caption("Use the lever to split the project cost between **Equity** and **Loan**.")
         max_equity = max(int(total_capex), 0)
-        default_equity = max_equity // 2 if max_equity > 0 else 0
+        # Default = 100% equity, 0% loan
+        default_equity = max_equity
 
         equity_amount_int = st.slider(
             "Equity (Cash Invested, AED)",
@@ -135,7 +136,7 @@ with tab1:
             max_value=max_equity,
             value=default_equity,
             step=1000,
-            help="Move left for more loan / leverage, right for more equity. Step = 1,000 AED."
+            help="Default is 100% equity, 0% loan. Move left for more leverage. Step = 1,000 AED."
         )
         equity_amount = float(equity_amount_int)
         debt_amount = float(total_capex - equity_amount)
@@ -156,7 +157,7 @@ with tab1:
 
         cost_of_equity = st.number_input(
             "Cost of Equity (required return, %)",
-            value=18.0,
+            value=10.5,          # <- default 10.5%
             step=0.5
         ) / 100.0
 
@@ -172,22 +173,6 @@ with tab1:
             max_value=10,
             value=5,
             help="Used only if Debt Amount > 0."
-        )
-
-        # Exit strategy inputs
-        st.subheader("Exit Strategy")
-        exit_year = st.number_input(
-            "Exit Year (1–5)",
-            min_value=1,
-            max_value=5,
-            value=5,
-            step=1
-        )
-        exit_multiple = st.number_input(
-            "Exit Multiple of Year Exit EBIT (x)",
-            min_value=0.0,
-            value=5.0,
-            step=0.5
         )
 
         # Calculate WACC
@@ -253,14 +238,14 @@ with tab1:
 
     for name, arr in opex_base.items():
         adj = arr * opex_factor
-        row = {"OPEX Item": name}
+        row = {"OPEX Item": f"**{name}**"}
         for i, y in enumerate(years):
             row[f"Year {y} (AED)"] = adj[i]
             adj_total[i] += adj[i]
         opex_rows.append(row)
 
     # Totals row
-    total_row = {"OPEX Item": "TOTAL OPEX (all items)"}
+    total_row = {"OPEX Item": "**TOTAL OPEX (all items)**"}
     for i, y in enumerate(years):
         total_row[f"Year {y} (AED)"] = adj_total[i]
     df_opex = pd.DataFrame(opex_rows + [total_row])
@@ -274,8 +259,8 @@ with tab1:
         use_container_width=True
     )
 
-    # ========== CASH FLOW & RETURNS (WITH EXIT) ==========
-    st.subheader("Cash Flow & Returns (Year 0–5, with Exit)")
+    # ========== CASH FLOW & RETURNS (NO EXIT) ==========
+    st.subheader("Cash Flow & Returns (Year 0–5)")
 
     # Adjusted Net Sales
     revenue = base_revenue * sales_factor
@@ -283,7 +268,7 @@ with tab1:
     # Total adjusted OPEX
     opex_total = adj_total
 
-    # Operating profit and unlevered FCFF (no exit yet)
+    # Operating profit and unlevered FCFF
     ebit = revenue - opex_total
     fcff_unlevered = ebit * (1 - tax_rate)
 
@@ -309,119 +294,68 @@ with tab1:
             outstanding -= principal[t]
             outstanding = max(outstanding, 0.0)
 
-    # After financing (no exit yet)
+    # After financing
     ebt = ebit - interest
     tax = np.where(ebt > 0, ebt * tax_rate, 0.0)
     net_income = ebt - tax
     fcfe = net_income - principal
     profit_margin = np.where(revenue > 0, net_income / revenue, 0.0)
 
-    # ---------- EXIT VALUE ----------
-    exit_index = int(exit_year) - 1  # 0-based
-    fcff_with_exit = fcff_unlevered.copy()
-    fcfe_with_exit = fcfe.copy()
-    exit_project_cf = np.zeros(n_years)
-    exit_equity_cf = np.zeros(n_years)
-    exit_value = 0.0
-    equity_exit_value = 0.0
+    # Project (unlevered) cash flows
+    project_cf = np.concatenate(([-total_capex], fcff_unlevered))
+    project_irr = nf.irr(project_cf)
+    project_npv = sum(cf / ((1 + wacc) ** t) for t, cf in enumerate(project_cf))
+    project_payback = compute_payback(project_cf)
 
-    if 0 <= exit_index < n_years and exit_multiple > 0:
-        exit_value = ebit[exit_index] * exit_multiple
-
-        # Remaining debt at exit (after scheduled principal up to that year)
-        cum_principal_to_exit = principal[: exit_index + 1].sum()
-        outstanding_after_schedule = debt_amount - cum_principal_to_exit
-        if outstanding_after_schedule < 0:
-            outstanding_after_schedule = 0.0
-
-        equity_exit_value = exit_value - outstanding_after_schedule
-
-        fcff_with_exit[exit_index] += exit_value
-        fcfe_with_exit[exit_index] += equity_exit_value
-
-        exit_project_cf[exit_index] = exit_value
-        exit_equity_cf[exit_index] = equity_exit_value
-
-    # ---------- CASH FLOWS & METRICS ----------
-    # Without exit
-    project_cf_no_exit = np.concatenate(([-total_capex], fcff_unlevered))
-    equity_cf_no_exit = np.concatenate(([-equity_amount], fcfe))
-
-    # With exit
-    project_cf = np.concatenate(([-total_capex], fcff_with_exit))
-    equity_cf = np.concatenate(([-equity_amount], fcfe_with_exit))
-
-    # IRRs
-    project_irr_no_exit = nf.irr(project_cf_no_exit)
-    project_irr_exit = nf.irr(project_cf)
-
+    # Equity (levered) cash flows
+    equity_cf = np.concatenate(([-equity_amount], fcfe))
     if equity_amount > 0:
         try:
-            equity_irr_no_exit = nf.irr(equity_cf_no_exit)
+            equity_irr = nf.irr(equity_cf)
         except Exception:
-            equity_irr_no_exit = np.nan
-        try:
-            equity_irr_exit = nf.irr(equity_cf)
-        except Exception:
-            equity_irr_exit = np.nan
+            equity_irr = np.nan
     else:
-        equity_irr_no_exit = np.nan
-        equity_irr_exit = np.nan
+        equity_irr = np.nan
+    equity_payback = compute_payback(equity_cf)
 
-    # Paybacks
-    project_payback_exit = compute_payback(project_cf)
-    equity_payback_exit = compute_payback(equity_cf)
-
-    # Investor cash flows
-    investor_cf_no_exit = equity_cf_no_exit * investor_equity_share
-    investor_cf_no_exit[0] = -investor_equity_investment
-
+    # Investor cash flows (share of equity CF)
     investor_cf = equity_cf * investor_equity_share
     investor_cf[0] = -investor_equity_investment
-
     if investor_equity_investment > 0:
         try:
-            investor_irr_no_exit = nf.irr(investor_cf_no_exit)
+            investor_irr = nf.irr(investor_cf)
         except Exception:
-            investor_irr_no_exit = np.nan
-        try:
-            investor_irr_exit = nf.irr(investor_cf)
-        except Exception:
-            investor_irr_exit = np.nan
+            investor_irr = np.nan
     else:
-        investor_irr_no_exit = np.nan
-        investor_irr_exit = np.nan
-
-    # NPV with exit
-    project_npv_exit = sum(cf / ((1 + wacc) ** t) for t, cf in enumerate(project_cf))
+        investor_irr = np.nan
 
     years0 = np.arange(0, len(project_cf))
     cum_project_cf = np.cumsum(project_cf)
     cum_equity_cf = np.cumsum(equity_cf)
 
-    # ---------- KPIs (WITH EXIT) ----------
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Project IRR (with exit)", f"{project_irr_exit * 100:,.1f} %")
-    k2.metric(
-        "Equity IRR (with exit)",
-        f"{equity_irr_exit * 100:,.1f} %" if not np.isnan(equity_irr_exit) else "n/a"
+    # KPIs
+    kcol1, kcol2, kcol3 = st.columns(3)
+    kcol1.metric("Project IRR (unlevered)", f"{project_irr * 100:,.1f} %")
+    kcol2.metric("Project NPV (AED)", f"{project_npv:,.0f}")
+    kcol3.metric(
+        "Project Payback (years)",
+        f"{project_payback:,.2f}" if project_payback is not None else "n/a"
     )
-    if not np.isnan(investor_irr_exit):
-        label = "Investor IRR (with exit, sweat-equity deal)" if sweat_equity_mode else "Investor IRR (with exit)"
-        k3.metric(label, f"{investor_irr_exit * 100:,.1f} %")
-    else:
-        k3.metric("Investor IRR (with exit)", "n/a")
 
-    k4, k5, k6 = st.columns(3)
-    k4.metric("Project NPV (with exit, AED)", f"{project_npv_exit:,.0f}")
-    k5.metric(
-        "Project Payback (with exit, years)",
-        f"{project_payback_exit:,.2f}" if project_payback_exit is not None else "n/a"
+    kcol4, kcol5, kcol6 = st.columns(3)
+    kcol4.metric(
+        "Equity IRR (levered)",
+        f"{equity_irr * 100:,.1f} %" if not np.isnan(equity_irr) else "n/a"
     )
-    k6.metric(
-        "Equity Payback (with exit, years)",
-        f"{equity_payback_exit:,.2f}" if equity_payback_exit is not None else "n/a"
+    kcol5.metric(
+        "Equity Payback (years)",
+        f"{equity_payback:,.2f}" if equity_payback is not None else "n/a"
     )
+    if not np.isnan(investor_irr):
+        label = "Investor IRR (sweat-equity deal)" if sweat_equity_mode else "Investor IRR"
+        kcol6.metric(label, f"{investor_irr * 100:,.1f} %")
+    else:
+        kcol6.metric("Investor IRR", "n/a")
 
     if sweat_equity_mode:
         st.info(
@@ -429,14 +363,7 @@ with tab1:
             "Their financial IRR is technically infinite / not applicable."
         )
 
-    st.markdown(
-        f"**IRR without exit (for reference):**  "
-        f"Project: `{project_irr_no_exit * 100:,.1f}%`, "
-        f"Equity: `{equity_irr_no_exit * 100:,.1f}%`, "
-        f"Investor: `{investor_irr_no_exit * 100:,.1f}%`"
-    )
-
-    # ---------- CASH FLOW TABLE (WITH EXIT) ----------
+    # Cash flow table Year 0–5
     cash_rows = []
 
     # Year 0
@@ -449,8 +376,6 @@ with tab1:
         "Tax (AED)": 0.0,
         "Net Income (AED)": 0.0,
         "Profit Margin (%)": 0.0,
-        "Exit Project CF (AED)": 0.0,
-        "Exit Equity CF (AED)": 0.0,
         "Project FCFF (AED)": -total_capex,
         "Equity FCFE (AED)": -equity_amount,
         "Cumulative Project CF (AED)": cum_project_cf[0],
@@ -468,10 +393,8 @@ with tab1:
             "Tax (AED)": tax[i],
             "Net Income (AED)": net_income[i],
             "Profit Margin (%)": profit_margin[i] * 100,
-            "Exit Project CF (AED)": exit_project_cf[i],
-            "Exit Equity CF (AED)": exit_equity_cf[i],
-            "Project FCFF (AED)": fcff_with_exit[i],
-            "Equity FCFE (AED)": fcfe_with_exit[i],
+            "Project FCFF (AED)": fcff_unlevered[i],
+            "Equity FCFE (AED)": fcfe[i],
             "Cumulative Project CF (AED)": cum_project_cf[i+1],
             "Cumulative Equity CF (AED)": cum_equity_cf[i+1],
         })
@@ -486,8 +409,6 @@ with tab1:
         "Tax (AED)": "{:,.0f}",
         "Net Income (AED)": "{:,.0f}",
         "Profit Margin (%)": "{:,.1f}",
-        "Exit Project CF (AED)": "{:,.0f}",
-        "Exit Equity CF (AED)": "{:,.0f}",
         "Project FCFF (AED)": "{:,.0f}",
         "Equity FCFE (AED)": "{:,.0f}",
         "Cumulative Project CF (AED)": "{:,.0f}",
